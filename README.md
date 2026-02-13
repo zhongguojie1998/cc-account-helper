@@ -1,4 +1,4 @@
-# Multi-Account Switcher for Claude Code
+# Multi-Account Helper for Claude Code
 
 A simple tool to manage and switch between multiple Claude Code accounts on macOS, Linux, and WSL. Includes an auto-renewal daemon to start 5-hour usage windows on a schedule.
 
