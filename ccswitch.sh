@@ -993,7 +993,7 @@ main() {
             show_usage
             ;;
         "")
-            show_usage
+            cmd_switch
             ;;
         *)
             echo "Error: Unknown command '$1'"
