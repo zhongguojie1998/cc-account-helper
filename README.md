@@ -1,22 +1,24 @@
 # Multi-Account Switcher for Claude Code
 
-A simple tool to manage and switch between multiple Claude Code accounts on macOS, Linux, and WSL.
+A simple tool to manage and switch between multiple Claude Code accounts on macOS, Linux, and WSL. Includes an auto-renewal daemon to start 5-hour usage windows on a schedule.
 
 ## Features
 
 - **Multi-account management**: Add, remove, and list Claude Code accounts
 - **Quick switching**: Switch between accounts with simple commands
+- **Auto-renewal**: Automatically start 5-hour usage windows at scheduled times across all accounts
 - **Cross-platform**: Works on macOS, Linux, and WSL
 - **Secure storage**: Uses system keychain (macOS) or protected files (Linux/WSL)
 - **Settings preservation**: Only switches authentication - your themes, settings, and preferences remain unchanged
 
 ## Installation
 
-Download the script directly:
+Download the scripts directly:
 
 ```bash
 curl -O https://raw.githubusercontent.com/ming86/cc-account-switcher/main/ccswitch.sh
-chmod +x ccswitch.sh
+curl -O https://raw.githubusercontent.com/ming86/cc-account-switcher/main/ccautorenew.sh
+chmod +x ccswitch.sh ccautorenew.sh
 ```
 
 ## Usage
@@ -43,6 +45,48 @@ chmod +x ccswitch.sh
 # Show help
 ./ccswitch.sh --help
 ```
+
+### Auto-Renewal (ccautorenew)
+
+Claude Code grants usage in 5-hour blocks starting from your first message. `ccautorenew.sh` automatically sends a minimal message (`"hi"` using the cheapest model) to start each account's 5-hour window at a predictable time.
+
+```bash
+# Test: ping all accounts once immediately
+./ccautorenew.sh --once
+
+# Start daemon: first ping at 9 AM, then every 5 hours
+./ccautorenew.sh --start --at 09:00
+
+# Only ping specific accounts
+./ccautorenew.sh --start --at 09:00 --accounts 1,2
+
+# Custom interval (every 4 hours instead of 5)
+./ccautorenew.sh --start --interval 4
+
+# Check daemon status and last ping results
+./ccautorenew.sh --status
+
+# View recent log entries
+./ccautorenew.sh --log
+
+# Stop the daemon
+./ccautorenew.sh --stop
+```
+
+| Option | Description |
+|---|---|
+| `--once` | Ping all accounts once (good for testing) |
+| `--start` | Start the background daemon |
+| `--stop` | Stop the daemon |
+| `--status` | Show daemon and last-ping status |
+| `--log [N]` | Show last N log lines (default: 20) |
+| `--at HH:MM` | Schedule first ping at a specific time |
+| `--accounts all\|1,2,3` | Which accounts to ping (default: all) |
+| `--interval HOURS` | Hours between pings (default: 5) |
+| `--model MODEL` | Model for the ping (default: haiku) |
+| `--message MSG` | Message to send (default: hi) |
+
+The daemon iterates through each account, switches credentials via `ccswitch.sh`, sends the ping, then restores the original active account when done.
 
 ### First Time Setup
 
@@ -110,9 +154,10 @@ When switching accounts, it:
 
 To stop using this tool and remove all data:
 
-1. Note your current active account: `./ccswitch.sh --list`
-2. Remove the backup directory: `rm -rf ~/.claude-switch-backup`
-3. Delete the script: `rm ccswitch.sh`
+1. Stop the auto-renewal daemon if running: `./ccautorenew.sh --stop`
+2. Note your current active account: `./ccswitch.sh --list`
+3. Remove the backup directory: `rm -rf ~/.claude-switch-backup`
+4. Delete the scripts: `rm ccswitch.sh ccautorenew.sh`
 
 Your current Claude Code login will remain active.
 
