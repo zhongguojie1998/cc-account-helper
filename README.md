@@ -16,8 +16,8 @@ A simple tool to manage and switch between multiple Claude Code accounts on macO
 Download the scripts directly:
 
 ```bash
-curl -O https://raw.githubusercontent.com/ming86/cc-account-switcher/main/ccswitch.sh
-curl -O https://raw.githubusercontent.com/ming86/cc-account-switcher/main/ccautorenew.sh
+curl -O https://raw.githubusercontent.com/zhongguojie1998/cc-account-helper/main/ccswitch.sh
+curl -O https://raw.githubusercontent.com/zhongguojie1998/cc-account-helper/main/ccautorenew.sh
 chmod +x ccswitch.sh ccautorenew.sh
 ```
 
