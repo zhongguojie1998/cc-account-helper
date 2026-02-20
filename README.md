@@ -7,7 +7,7 @@ A comprehensive toolbox to manage and enhance Claude Code on macOS, Linux, and W
 - **Multi-account management**: Add, remove, and list Claude Code accounts with easy switching (`ccswitch.sh`)
 - **Quick account switching**: Switch between accounts with simple commands
 - **Auto-renewal daemon**: Automatically start 5-hour usage windows at scheduled times across all accounts (`ccautorenew.sh`)
-- **Usage monitoring**: Display real-time quota usage and session cost in Claude Code's status line (`statusline-command.sh`)
+- **Usage monitoring**: Display real-time quota usage and session cost in Claude Code's status line (`statusline-command-macOS.sh` / `statusline-command-Linux.sh`)
 - **Cross-platform**: Works on macOS, Linux, and WSL
 - **Secure storage**: Uses system keychain (macOS) or protected files (Linux/WSL)
 - **Settings preservation**: Only switches authentication - your themes, settings, and preferences remain unchanged
@@ -19,25 +19,52 @@ Download the scripts directly:
 ```bash
 curl -O https://raw.githubusercontent.com/zhongguojie1998/cc-account-helper/main/ccswitch.sh
 curl -O https://raw.githubusercontent.com/zhongguojie1998/cc-account-helper/main/ccautorenew.sh
-curl -O https://raw.githubusercontent.com/zhongguojie1998/cc-account-helper/main/statusline-command.sh
-chmod +x ccswitch.sh ccautorenew.sh statusline-command.sh
+chmod +x ccswitch.sh ccautorenew.sh
 ```
+
+Then download the statusline script for your platform (see below).
 
 ### Setup Statusline Command
 
 To display Claude Code usage quota in your status line:
 
-1. Move the script to your Claude Code config directory:
+#### macOS
+
+Credentials are read from the **macOS Keychain** (where Claude Code stores them natively).
+
+1. Download and install the script:
 ```bash
-mv statusline-command.sh ~/.claude/statusline-command.sh
+curl -O https://raw.githubusercontent.com/zhongguojie1998/cc-account-helper/main/statusline-command-macOS.sh
+mv statusline-command-macOS.sh ~/.claude/statusline-command-macOS.sh
 ```
 
-2. Edit `~/.claude/settings.json` to configure the statusline command:
+2. Edit `~/.claude/settings.json`:
 ```json
 {
   "statusLine": {
     "type": "command",
-    "command": "bash $HOME/.claude/statusline-command.sh",
+    "command": "bash $HOME/.claude/statusline-command-macOS.sh",
+    "padding": 0
+  }
+}
+```
+
+#### Linux / WSL
+
+Credentials are read from `~/.claude/.credentials.json` (where Claude Code stores them on Linux).
+
+1. Download and install the script:
+```bash
+curl -O https://raw.githubusercontent.com/zhongguojie1998/cc-account-helper/main/statusline-command-Linux.sh
+mv statusline-command-Linux.sh ~/.claude/statusline-command-Linux.sh
+```
+
+2. Edit `~/.claude/settings.json`:
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "bash $HOME/.claude/statusline-command-Linux.sh",
     "padding": 0
   }
 }
@@ -112,7 +139,7 @@ Claude Code grants usage in 5-hour blocks starting from your first message. `cca
 
 The daemon iterates through each account, switches credentials via `ccswitch.sh`, sends the ping, then restores the original active account when done.
 
-### Statusline Command (statusline-command.sh)
+### Statusline Command (statusline-command-macOS.sh / statusline-command-Linux.sh)
 
 Displays your Claude Code usage quota and session cost in a custom status line. Shows:
 - Conda environment name
@@ -197,7 +224,7 @@ To stop using this tool and remove all data:
 1. Stop the auto-renewal daemon if running: `./ccautorenew.sh --stop`
 2. Note your current active account: `./ccswitch.sh --list`
 3. Remove the backup directory: `rm -rf ~/.claude-switch-backup`
-4. Delete the scripts: `rm ccswitch.sh ccautorenew.sh`
+4. Delete the scripts: `rm ccswitch.sh ccautorenew.sh statusline-command-macOS.sh statusline-command-Linux.sh`
 
 Your current Claude Code login will remain active.
 

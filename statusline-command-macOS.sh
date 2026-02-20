@@ -1,8 +1,6 @@
 #!/bin/bash
 # Statusline: 🐦 {conda_env} {user}@{host}:{cwd} {model} | ${cost} | 🟢 5h: X% (Xh Xm) | 🟢 7d: X% (Xd Xh)
-# Adapted from https://gist.github.com/lexfrei/b70aaee919bdd7164f2e3027dc8c98de for Linux HPC
-
-export PATH="/gpfs/commons/home/guojiezhong/miniconda3/bin:$PATH"
+# macOS variant of statusline-command.sh (uses BSD stat/date instead of GNU)
 
 # Cache settings
 CACHE_FILE="/tmp/claude-usage-cache-$(id -u).json"
@@ -16,17 +14,17 @@ get_usage() {
     # Check cache
     if [[ -f "$CACHE_FILE" ]]; then
         local cache_time
-        cache_time=$(stat -c %Y "$CACHE_FILE" 2>/dev/null || echo 0)
+        cache_time=$(stat -f %m "$CACHE_FILE" 2>/dev/null || echo 0)
         if (( now - cache_time < CACHE_TTL )); then
             cat "$CACHE_FILE"
             return
         fi
     fi
 
-    # Get credentials from ~/.claude/.credentials.json (Linux equivalent of macOS Keychain)
-    local creds_file="$HOME/.claude/.credentials.json"
+    # Get credentials from macOS Keychain
     local token
-    token=$(python3 -c "import json; d=json.load(open('$creds_file')); print(d['claudeAiOauth']['accessToken'])" 2>/dev/null) || return 1
+    token=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null \
+        | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d['claudeAiOauth']['accessToken'])" 2>/dev/null) || return 1
 
     if [[ -z "$token" ]]; then
         return 1
@@ -45,7 +43,7 @@ get_usage() {
 }
 
 # Calculate time remaining (in minutes) from ISO timestamp (UTC)
-# Uses GNU date (-d) instead of BSD date (-j -f)
+# Uses BSD date (-j -f) instead of GNU date (-d)
 time_remaining_mins() {
     local reset_at=$1
     local now reset_ts diff
@@ -53,7 +51,7 @@ time_remaining_mins() {
     now=$(date +%s)
     local ts_clean="${reset_at%%.*}"
     ts_clean="${ts_clean//T/ }"
-    reset_ts=$(TZ=UTC date -d "$ts_clean" +%s 2>/dev/null) || return 1
+    reset_ts=$(TZ=UTC date -j -f "%Y-%m-%d %H:%M:%S" "$ts_clean" +%s 2>/dev/null) || return 1
 
     diff=$((reset_ts - now))
     echo $(( diff / 60 ))
