@@ -1,7 +1,7 @@
 #!/bin/bash
 # Two-line Statusline:
-# Line 1: 🐦 {conda_env} {user}@{host}:{cwd} {model}
-# Line 2: [progress bar] | ${cost} | 🟢 5h: X% (Xh Xm) | 🟢 7d: X% (Xd Xh)
+# Line 1: 🐦 {conda_env} {user}@{host}:{cwd} {branch}
+# Line 2: {model} | [progress bar] | ${cost} | 🟢 5h: X% (Xh Xm) | 🟢 7d: X% (Xd Xh)
 # macOS variant of statusline-command.sh (uses BSD stat/date instead of GNU)
 
 # Cache settings
@@ -157,6 +157,11 @@ main() {
     cwd=$(echo "$input" | jq -r '.cwd // empty' 2>/dev/null)
     [[ -z "$cwd" ]] && cwd="$PWD"
 
+    # Git branch
+    local branch
+    branch=$(cd "$cwd" 2>/dev/null && git branch --show-current 2>/dev/null) || branch="(no git)"
+    [[ -z "$branch" ]] && branch="(no git)"
+
     # Model: strip "Claude " prefix → "Haiku 4.5"
     local model
     model=$(echo "$input" | jq -r '.model.display_name // empty' 2>/dev/null)
@@ -167,11 +172,12 @@ main() {
     local C_CYAN="\033[96m"    # bright cyan   — 🐦 conda env
     local C_GREEN="\033[92m"   # bright green  — user@host
     local C_BLUE="\033[94m"    # bright blue   — :path
+    local C_WHITE="\033[97m"   # bright white  — git branch
     local C_LYELLOW="\033[93m" # light yellow  — model name
     local C_YELLOW="\033[33m"  # yellow        — cost + quota
     local C_RESET="\033[0m"
 
-    local line1="${C_CYAN}🐦 ${conda_env}${C_RESET} ${C_GREEN}${user}@${host}${C_RESET}${C_BLUE}:${cwd}${C_RESET} ${C_LYELLOW}${model}${C_RESET}"
+    local line1="${C_CYAN}🐦 ${conda_env}${C_RESET} ${C_GREEN}${user}@${host}${C_RESET}${C_BLUE}:${cwd}${C_RESET} ${C_WHITE}${branch}${C_RESET}"
 
     # ── Line 2 components ────────────────────────────────────────────────────
     # Context window progress bar (from Claude Code JSON input)
@@ -185,7 +191,7 @@ main() {
     session_cost=$(echo "$input" | jq -r '.cost.total_cost_usd // 0' 2>/dev/null)
     session_cost=$(printf '%.2f' "$session_cost")
 
-    local line2="${C_YELLOW}${progress_bar} | \$${session_cost}"
+    local line2="${C_LYELLOW}${model}${C_RESET} ${C_YELLOW}| ${progress_bar} | \$${session_cost}"
 
     # Quota from API
     local usage
