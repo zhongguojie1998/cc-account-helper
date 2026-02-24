@@ -1,5 +1,7 @@
 #!/bin/bash
-# Statusline: 🐦 {conda_env} {user}@{host}:{cwd} {model} | ${cost} | 🟢 5h: X% (Xh Xm) | 🟢 7d: X% (Xd Xh)
+# Two-line Statusline:
+# Line 1: 🐦 {conda_env} {user}@{host}:{cwd} {model}
+# Line 2: [progress bar] | ${cost} | 🟢 5h: X% (Xh Xm) | 🟢 7d: X% (Xd Xh)
 # Adapted from https://gist.github.com/lexfrei/b70aaee919bdd7164f2e3027dc8c98de for Linux HPC
 
 # If jq, python3, or curl are not on your PATH, add the relevant bin directory here:
@@ -111,12 +113,44 @@ rate_indicator() {
     fi
 }
 
+# Build a context window progress bar using block characters
+# e.g.  ▓▓▓▓▓░░░░░ 42%
+build_progress_bar() {
+    local used_pct=$1   # integer 0-100, or empty/null
+    local BAR_WIDTH=10
+
+    # If no data yet, show empty bar with no label
+    if [[ -z "$used_pct" || "$used_pct" == "null" ]]; then
+        local empty_bar=""
+        local i
+        for (( i=0; i<BAR_WIDTH; i++ )); do empty_bar+="░"; done
+        printf "%s --" "$empty_bar"
+        return
+    fi
+
+    # Clamp to 0-100
+    (( used_pct < 0 )) && used_pct=0
+    (( used_pct > 100 )) && used_pct=100
+
+    local PCT=$used_pct
+    local FILLED=$(( PCT * BAR_WIDTH / 100 ))
+    local EMPTY=$(( BAR_WIDTH - FILLED ))
+
+    local bar=""
+    local i
+    for (( i=0; i<FILLED; i++ )); do bar+="▓"; done
+    for (( i=0; i<EMPTY;  i++ )); do bar+="░"; done
+
+    printf "%s %d%%" "$bar" "$used_pct"
+}
+
 # Main - receives JSON from Claude Code via stdin
 main() {
     local input
     input=$(cat)
 
-    # Conda env name (🐦 base / 🐦 scvi / etc.)
+    # ── Line 1 components ────────────────────────────────────────────────────
+    # Conda env name
     local conda_env="${CONDA_DEFAULT_ENV:-base}"
 
     # user@host:cwd
@@ -126,26 +160,35 @@ main() {
     cwd=$(echo "$input" | jq -r '.cwd // empty' 2>/dev/null)
     [[ -z "$cwd" ]] && cwd="$PWD"
 
-    # Model: strip "Claude " prefix → "Sonnet 4.6"
+    # Model: strip "Claude " prefix → "Haiku 4.5"
     local model
     model=$(echo "$input" | jq -r '.model.display_name // empty' 2>/dev/null)
     model="${model#Claude }"
     [[ -z "$model" ]] && model="Claude"
 
-    # Session cost
-    local session_cost
-    session_cost=$(echo "$input" | jq -r '.cost.total_cost_usd // 0' 2>/dev/null)
-    session_cost=$(printf '%.2f' "$session_cost")
-
     # ANSI colors
-    local C_CYAN="\033[96m"    # bright cyan  — 🐦 conda env
+    local C_CYAN="\033[96m"    # bright cyan   — 🐦 conda env
     local C_GREEN="\033[92m"   # bright green  — user@host
     local C_BLUE="\033[94m"    # bright blue   — :path
     local C_LYELLOW="\033[93m" # light yellow  — model name
     local C_YELLOW="\033[33m"  # yellow        — cost + quota
     local C_RESET="\033[0m"
 
-    local line="${C_CYAN}🐦 ${conda_env}${C_RESET} ${C_GREEN}${user}@${host}${C_RESET}${C_BLUE}:${cwd}${C_RESET} ${C_LYELLOW}${model}${C_RESET} ${C_YELLOW}| \$${session_cost}"
+    local line1="${C_CYAN}🐦 ${conda_env}${C_RESET} ${C_GREEN}${user}@${host}${C_RESET}${C_BLUE}:${cwd}${C_RESET} ${C_LYELLOW}${model}${C_RESET}"
+
+    # ── Line 2 components ────────────────────────────────────────────────────
+    # Context window progress bar (from Claude Code JSON input)
+    local used_pct
+    used_pct=$(echo "$input" | jq -r '.context_window.used_percentage // empty' 2>/dev/null)
+    local progress_bar
+    progress_bar=$(build_progress_bar "$used_pct")
+
+    # Session cost
+    local session_cost
+    session_cost=$(echo "$input" | jq -r '.cost.total_cost_usd // 0' 2>/dev/null)
+    session_cost=$(printf '%.2f' "$session_cost")
+
+    local line2="${C_YELLOW}${progress_bar} | \$${session_cost}"
 
     # Quota from API
     local usage
@@ -155,7 +198,7 @@ main() {
     [[ -n "$usage" ]] && api_error=$(echo "$usage" | jq -r '.error.type // empty' 2>/dev/null)
 
     if [[ -n "$api_error" ]]; then
-        line+=" | ⚠️ /login needed${C_RESET}"
+        line2+=" | ⚠️ /login needed${C_RESET}"
     elif [[ -n "$usage" ]]; then
         local five_hour five_hour_resets seven_day seven_day_resets
         five_hour=$(echo "$usage" | jq -r '.five_hour.utilization // empty' 2>/dev/null)
@@ -170,7 +213,7 @@ main() {
             fh_mins=$(time_remaining_mins "$five_hour_resets" 2>/dev/null) || fh_mins=0
             fh_ind=$(rate_indicator "$fh_int" "$fh_mins" 300)
             fh_time=$(format_time "$fh_mins")
-            line+=" | ${fh_ind} 5h: ${fh_int}% (${fh_time})"
+            line2+=" | ${fh_ind} 5h: ${fh_int}% (${fh_time})"
         fi
 
         # 7d second
@@ -180,15 +223,15 @@ main() {
             sd_mins=$(time_remaining_mins "$seven_day_resets" 2>/dev/null) || sd_mins=0
             sd_ind=$(rate_indicator "$sd_int" "$sd_mins" 10080)
             sd_time=$(format_time "$sd_mins")
-            line+=" | ${sd_ind} 7d: ${sd_int}% (${sd_time})"
+            line2+=" | ${sd_ind} 7d: ${sd_int}% (${sd_time})"
         fi
 
-        line+="${C_RESET}"
+        line2+="${C_RESET}"
     else
-        line+="${C_RESET}"
+        line2+="${C_RESET}"
     fi
 
-    echo -e "$line"
+    printf "%b\n%b\n" "$line1" "$line2"
 }
 
 main
