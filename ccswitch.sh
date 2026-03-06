@@ -313,6 +313,27 @@ write_account_credentials() {
     esac
 }
 
+# Sync live credentials back to the active account's backup
+sync_current_credentials() {
+    local active_account active_email
+    active_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+    if [[ -z "$active_account" || "$active_account" == "null" ]]; then
+        echo "Error: No active account found in sequence file" >&2
+        return 1
+    fi
+    active_email=$(jq -r --arg num "$active_account" '.accounts[$num].email' "$SEQUENCE_FILE")
+
+    local live_creds
+    live_creds=$(read_credentials)
+    if [[ -z "$live_creds" ]]; then
+        echo "Error: Could not read live credentials" >&2
+        return 1
+    fi
+
+    write_account_credentials "$active_account" "$active_email" "$live_creds"
+    write_account_config "$active_account" "$active_email" "$(cat "$(get_claude_config_path)")"
+}
+
 # Read account config from backup
 read_account_config() {
     local account_num="$1"
@@ -856,6 +877,59 @@ cmd_switch_to() {
     perform_switch "$target_account"
 }
 
+# Sync live credentials to active account's backup
+cmd_sync() {
+    if [[ ! -f "$SEQUENCE_FILE" ]]; then
+        echo "Error: No accounts are managed yet"
+        exit 1
+    fi
+    sync_current_credentials
+    local active email
+    active=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+    email=$(jq -r --arg n "$active" '.accounts[$n].email' "$SEQUENCE_FILE")
+    echo "Synced: Account-$active ($email) credentials updated from live state"
+}
+
+# Switch to account, launch claude, sync credentials on exit
+cmd_run() {
+    if [[ ! -f "$SEQUENCE_FILE" ]]; then
+        echo "Error: No accounts are managed yet" >&2
+        exit 1
+    fi
+
+    local target_account=""
+
+    # If first arg is a number, treat it as account number
+    if [[ $# -gt 0 && "$1" =~ ^[0-9]+$ ]]; then
+        target_account="$1"
+        shift
+
+        local account_info
+        account_info=$(jq -r --arg num "$target_account" '.accounts[$num] // empty' "$SEQUENCE_FILE")
+        if [[ -z "$account_info" ]]; then
+            echo "Error: Account-$target_account does not exist" >&2
+            exit 1
+        fi
+
+        perform_switch "$target_account"
+    else
+        # No account number — use active account, no switch needed
+        target_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+        if [[ -z "$target_account" || "$target_account" == "null" ]]; then
+            echo "Error: No active account found" >&2
+            exit 1
+        fi
+    fi
+
+    echo "Launching Claude Code for Account-$target_account..."
+    local exit_code=0
+    claude "$@" || exit_code=$?
+    echo "Claude exited. Syncing credentials..."
+    sync_current_credentials
+    echo "Credentials synced. Account-$target_account backup is up to date."
+    exit "$exit_code"
+}
+
 # Perform the actual account switch
 perform_switch() {
     local target_account="$1"
@@ -883,7 +957,22 @@ perform_switch() {
         echo "Error: Missing backup data for Account-$target_account"
         exit 1
     fi
-    
+
+    # Validate target credentials before restore (non-blocking warning)
+    local test_token
+    test_token=$(echo "$target_creds" | jq -r '.claudeAiOauth.accessToken // empty')
+    if [[ -n "$test_token" ]]; then
+        local http_code
+        http_code=$(curl -sf -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer $test_token" \
+            -H "anthropic-beta: oauth-2025-04-20" \
+            "https://api.anthropic.com/api/oauth/usage" 2>/dev/null) || true
+        if [[ "$http_code" == "401" ]]; then
+            echo "Warning: Account-$target_account credentials appear stale (401)." >&2
+            echo "         After restarting Claude Code, run: /login" >&2
+        fi
+    fi
+
     # Step 3: Activate target account
     write_credentials "$target_creds"
     
@@ -942,6 +1031,8 @@ show_usage() {
     echo "  --list                             List all managed accounts"
     echo "  --switch                           Rotate to next account in sequence"
     echo "  --switch-to <num|email>            Switch to specific account number or email"
+    echo "  run [num] [claude args...]         Switch to account (or use active), launch claude, sync on exit"
+    echo "  sync                               Sync live credentials to active account backup"
     echo "  --help                             Show this help message"
     echo ""
     echo "Same-email accounts (personal + team):"
@@ -957,6 +1048,8 @@ show_usage() {
     echo "  $0 --switch-to 2"
     echo "  $0 --switch-to user@example.com"
     echo "  $0 --remove-account user@example.com"
+    echo "  $0 run 2                          # switch to account 2, launch claude, auto-sync on exit"
+    echo "  $0 sync                           # manually sync live credentials to backup"
 }
 
 # Main script logic
@@ -988,6 +1081,13 @@ main() {
         --switch-to)
             shift
             cmd_switch_to "$@"
+            ;;
+        --sync|sync)
+            cmd_sync
+            ;;
+        --run|run)
+            shift
+            cmd_run "$@"
             ;;
         --help)
             show_usage

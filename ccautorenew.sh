@@ -148,6 +148,12 @@ ping_all_accounts() {
         [[ -z "$num" ]] && continue
         if ping_account "$num"; then
             ((success++))
+            # Sync credentials after ping to capture any token refreshes before switching away
+            if "$CCSWITCH" sync >/dev/null 2>&1; then
+                log_msg "INFO" "Synced credentials for Account-$num"
+            else
+                log_msg "WARN" "Failed to sync credentials for Account-$num"
+            fi
         else
             ((failed++))
         fi
