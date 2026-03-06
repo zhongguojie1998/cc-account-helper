@@ -4,6 +4,9 @@
 # Line 2: {model} | [progress bar] | ${cost} | 🟢 5h: X% (Xh Xm) | 🟢 7d: X% (Xd Xh)
 # macOS variant of statusline-command.sh (uses BSD stat/date instead of GNU)
 
+# If jq, python3, or curl are not on your PATH, add the relevant bin directory here:
+# export PATH="/path/to/your/conda/bin:$PATH"
+
 # Cache settings
 CACHE_FILE="/tmp/claude-usage-cache-$(id -u).json"
 CACHE_TTL=60  # seconds
@@ -130,7 +133,7 @@ build_progress_bar() {
     (( used_pct > 100 )) && used_pct=100
 
     local PCT=$used_pct
-    local FILLED=$(( PCT * BAR_WIDTH / 100 ))
+    local FILLED=$(( (PCT * BAR_WIDTH + 50) / 100 ))
     local EMPTY=$(( BAR_WIDTH - FILLED ))
 
     local bar=""
