@@ -19,7 +19,7 @@ readonly AR_STATE_FILE="$BACKUP_DIR/ccautorenew-state.json"
 
 # Defaults (overridable via flags)
 AR_INTERVAL_HOURS=5
-AR_MODEL="haiku"
+AR_MODEL="claude-haiku-4-5-20251001"
 AR_MESSAGE="hi"
 AR_AT_TIME=""
 AR_ACCOUNTS="all"
@@ -105,7 +105,7 @@ ping_account() {
     log_msg "INFO" "Pinging $display ..."
 
     # Switch to the target account
-    if ! "$CCSWITCH" --switch-to "$account_num" >/dev/null 2>&1; then
+    if ! "$CCSWITCH" --switch-to "$account_num" </dev/null >/dev/null 2>&1; then
         log_msg "ERROR" "Failed to switch to $display"
         return 1
     fi
@@ -114,7 +114,7 @@ ping_account() {
 
     # Send the minimal ping (unset CLAUDECODE to allow nested invocation)
     local output exit_code=0
-    output=$(CLAUDECODE= timeout 120 claude -p "$AR_MESSAGE" --model "$AR_MODEL" 2>&1) || exit_code=$?
+    output=$(CLAUDECODE= timeout 120 claude -p "$AR_MESSAGE" --model "$AR_MODEL" </dev/null 2>&1) || exit_code=$?
 
     if [[ $exit_code -eq 0 ]]; then
         log_msg "INFO" "Successfully pinged $display"
@@ -142,28 +142,32 @@ ping_all_accounts() {
         return 1
     fi
 
+    # Refresh OAuth tokens before pinging to avoid 401s
+    log_msg "INFO" "Refreshing OAuth tokens for all accounts..."
+    "$CCSWITCH" refresh-all >> "$AR_LOG_FILE" 2>&1 || log_msg "WARN" "Some token refreshes failed (continuing with ping)"
+
     local success=0 failed=0
 
-    while IFS= read -r num; do
+    while IFS= read -r num <&3; do
         [[ -z "$num" ]] && continue
         if ping_account "$num"; then
-            ((success++))
+            success=$((success + 1))
             # Sync credentials after ping to capture any token refreshes before switching away
-            if "$CCSWITCH" sync >/dev/null 2>&1; then
+            if "$CCSWITCH" sync </dev/null >/dev/null 2>&1; then
                 log_msg "INFO" "Synced credentials for Account-$num"
             else
                 log_msg "WARN" "Failed to sync credentials for Account-$num"
             fi
         else
-            ((failed++))
+            failed=$((failed + 1))
         fi
         sleep 3  # brief pause between accounts
-    done <<< "$accounts"
+    done 3<<< "$accounts"
 
     # Restore the original account
     if [[ -n "$original_account" ]]; then
         log_msg "INFO" "Restoring original Account-$original_account"
-        "$CCSWITCH" --switch-to "$original_account" >/dev/null 2>&1 || true
+        "$CCSWITCH" --switch-to "$original_account" </dev/null >/dev/null 2>&1 || true
     fi
 
     log_msg "INFO" "Ping round complete: $success succeeded, $failed failed"
@@ -356,6 +360,37 @@ cmd_log() {
     fi
 }
 
+cmd_cron_install() {
+    local script_path
+    script_path=$(readlink -f "${BASH_SOURCE[0]}")
+    local cron_schedule="0 0,5,10,15,20 * * *"
+    local cron_cmd="PATH='$PATH' $script_path --once --accounts all >> $AR_LOG_FILE 2>&1"
+    local cron_marker="# ccautorenew"
+
+    if crontab -l 2>/dev/null | grep -qF "$cron_marker"; then
+        echo "Cron job already installed. Use 'cron-remove' to uninstall first."
+        crontab -l 2>/dev/null | grep -F "$cron_marker"
+        return 0
+    fi
+
+    (crontab -l 2>/dev/null; echo "$cron_schedule $cron_cmd $cron_marker") | crontab -
+    echo "Installed cron job: $cron_schedule"
+    echo "Auto-renew will run at 00:00, 05:00, 10:00, 15:00, 20:00 daily."
+    echo "Log: $AR_LOG_FILE"
+}
+
+cmd_cron_remove() {
+    local cron_marker="# ccautorenew"
+
+    if ! crontab -l 2>/dev/null | grep -qF "$cron_marker"; then
+        echo "No ccautorenew cron job found."
+        return 0
+    fi
+
+    crontab -l 2>/dev/null | grep -vF "$cron_marker" | crontab -
+    echo "Removed ccautorenew cron job."
+}
+
 # ---------------------------------------------------------------------------
 # Usage
 # ---------------------------------------------------------------------------
@@ -368,11 +403,13 @@ Integrates with ccswitch.sh for multi-account support
 Usage: ccautorenew.sh [COMMAND] [OPTIONS]
 
 Commands:
-  --once               Ping all accounts once (good for testing)
+  --once               Ping all accounts once (cron-friendly)
   --start              Start the background daemon
   --stop               Stop the daemon
   --status             Show daemon / last-ping status
   --log [N]            Show last N log lines (default: 20)
+  --cron-install       Install cron job (00:00, 05:00, 10:00, 15:00, 20:00)
+  --cron-remove        Remove cron job
   --help               Show this help
 
 Options (for --start and --once):
@@ -385,6 +422,8 @@ Options (for --start and --once):
 Examples:
   ccautorenew.sh --once                            # test: ping all accounts now
   ccautorenew.sh --once --accounts 1,2             # test: ping accounts 1 & 2
+  ccautorenew.sh --cron-install                    # cron: 0:00,5:00,10:00,15:00,20:00
+  ccautorenew.sh --cron-remove                     # remove cron job
   ccautorenew.sh --start --at 09:00                # daemon: first ping at 9 AM
   ccautorenew.sh --start --at 09:00 --accounts 1   # daemon: only account 1
   ccautorenew.sh --start --interval 4              # daemon: every 4 hours
@@ -412,6 +451,8 @@ main() {
                     AR_LOG_LINES="$1"; shift
                 fi
                 ;;
+            --cron-install|cron-install)  command="cron-install";  shift ;;
+            --cron-remove|cron-remove)    command="cron-remove";   shift ;;
             --at)              AR_AT_TIME="$2";          shift 2 ;;
             --accounts)        AR_ACCOUNTS="$2";         shift 2 ;;
             --interval)        AR_INTERVAL_HOURS="$2";   shift 2 ;;
@@ -421,7 +462,7 @@ main() {
             # Internal: called by nohup wrapper to enter daemon loop
             --_run-daemon)
                 AR_INTERVAL_HOURS="${AR_INTERVAL_HOURS:-5}"
-                AR_MODEL="${AR_MODEL:-haiku}"
+                AR_MODEL="${AR_MODEL:-claude-haiku-4-5-20251001}"
                 AR_MESSAGE="${AR_MESSAGE:-hi}"
                 AR_AT_TIME="${AR_AT_TIME:-}"
                 AR_ACCOUNTS="${AR_ACCOUNTS:-all}"
@@ -442,11 +483,13 @@ main() {
     fi
 
     case "$command" in
-        once)   cmd_once   ;;
-        start)  cmd_start  ;;
-        stop)   cmd_stop   ;;
-        status) cmd_status ;;
-        log)    cmd_log    ;;
+        once)         cmd_once         ;;
+        start)        cmd_start        ;;
+        stop)         cmd_stop         ;;
+        status)       cmd_status       ;;
+        log)          cmd_log          ;;
+        cron-install) cmd_cron_install ;;
+        cron-remove)  cmd_cron_remove  ;;
     esac
 }
 

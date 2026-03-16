@@ -9,6 +9,132 @@ set -euo pipefail
 readonly BACKUP_DIR="$HOME/.claude-switch-backup"
 readonly SEQUENCE_FILE="$BACKUP_DIR/sequence.json"
 
+# OAuth token refresh
+readonly OAUTH_TOKEN_URL="https://platform.claude.com/v1/oauth/token"
+_CACHED_CLIENT_ID=""
+
+# Extract OAuth client ID from Claude Code binary or env var
+get_oauth_client_id() {
+    if [[ -n "$_CACHED_CLIENT_ID" ]]; then
+        echo "$_CACHED_CLIENT_ID"
+        return
+    fi
+
+    # Check env var first (Claude Code supports this)
+    if [[ -n "${CLAUDE_CODE_OAUTH_CLIENT_ID:-}" ]]; then
+        _CACHED_CLIENT_ID="$CLAUDE_CODE_OAUTH_CLIENT_ID"
+        echo "$_CACHED_CLIENT_ID"
+        return
+    fi
+
+    # Try to extract from Claude Code binary
+    local claude_bin
+    claude_bin=$(which claude 2>/dev/null || true)
+    if [[ -n "$claude_bin" ]]; then
+        local client_id
+        client_id=$(strings "$claude_bin" 2>/dev/null | grep -oP 'CLIENT_ID:"[^"]*"' | head -1 | grep -oP '"[^"]*"' | tr -d '"' || true)
+        if [[ -n "$client_id" ]]; then
+            _CACHED_CLIENT_ID="$client_id"
+            echo "$_CACHED_CLIENT_ID"
+            return
+        fi
+    fi
+
+    echo "Error: Cannot determine OAuth client ID. Set CLAUDE_CODE_OAUTH_CLIENT_ID env var." >&2
+    return 1
+}
+
+# Refresh OAuth token using refresh_token grant
+# Input: credentials JSON string
+# Output: updated credentials JSON string (empty on failure)
+refresh_oauth_token() {
+    local creds="$1"
+    local refresh_token
+    refresh_token=$(echo "$creds" | jq -r '.claudeAiOauth.refreshToken // empty')
+
+    if [[ -z "$refresh_token" ]]; then
+        echo ""
+        return
+    fi
+
+    local client_id
+    client_id=$(get_oauth_client_id) || { echo ""; return; }
+
+    local response http_code body
+    response=$(curl -s -w "\n%{http_code}" \
+        -X POST "$OAUTH_TOKEN_URL" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "grant_type=refresh_token&refresh_token=${refresh_token}&client_id=${client_id}" 2>/dev/null) || { echo ""; return; }
+
+    http_code=$(echo "$response" | tail -1)
+    body=$(echo "$response" | sed '$d')
+
+    if [[ "$http_code" != "200" ]]; then
+        local error
+        error=$(echo "$body" | jq -r '.error // empty' 2>/dev/null)
+        if [[ "$error" == "invalid_grant" ]]; then
+            echo "  Token refresh failed: invalid_grant (refresh token revoked)" >&2
+        else
+            echo "  Token refresh failed: HTTP $http_code" >&2
+        fi
+        echo ""
+        return
+    fi
+
+    # Extract new tokens from response
+    local new_access new_refresh expires_in
+    new_access=$(echo "$body" | jq -r '.access_token // empty')
+    new_refresh=$(echo "$body" | jq -r '.refresh_token // empty')
+    expires_in=$(echo "$body" | jq -r '.expires_in // empty')
+
+    if [[ -z "$new_access" || -z "$new_refresh" ]]; then
+        echo "  Token refresh failed: missing tokens in response" >&2
+        echo ""
+        return
+    fi
+
+    # Calculate new expiresAt (current time in ms + expires_in * 1000)
+    local now_ms expires_at
+    now_ms=$(date +%s)000
+    if [[ -n "$expires_in" ]]; then
+        expires_at=$(( ${now_ms%000} * 1000 + expires_in * 1000 ))
+    else
+        # Default 8 hours
+        expires_at=$(( ${now_ms%000} * 1000 + 28800 * 1000 ))
+    fi
+
+    # Update credentials JSON preserving all other fields
+    local updated_creds
+    updated_creds=$(echo "$creds" | jq \
+        --arg at "$new_access" \
+        --arg rt "$new_refresh" \
+        --argjson ea "$expires_at" \
+        '.claudeAiOauth.accessToken = $at |
+         .claudeAiOauth.refreshToken = $rt |
+         .claudeAiOauth.expiresAt = $ea')
+
+    echo "$updated_creds"
+}
+
+# Check if access token is expired (by expiresAt field)
+is_token_expired() {
+    local creds="$1"
+    local expires_at
+    expires_at=$(echo "$creds" | jq -r '.claudeAiOauth.expiresAt // 0')
+
+    if [[ "$expires_at" == "0" || "$expires_at" == "null" ]]; then
+        return 0  # Treat missing expiresAt as expired
+    fi
+
+    local now_ms
+    now_ms=$(( $(date +%s) * 1000 ))
+
+    if (( now_ms >= expires_at )); then
+        return 0  # Expired
+    fi
+    return 1  # Still valid
+}
+
 # Container detection
 is_running_in_container() {
     # Check for Docker environment file
@@ -958,17 +1084,18 @@ perform_switch() {
         exit 1
     fi
 
-    # Validate target credentials before restore (non-blocking warning)
-    local test_token
-    test_token=$(echo "$target_creds" | jq -r '.claudeAiOauth.accessToken // empty')
-    if [[ -n "$test_token" ]]; then
-        local http_code
-        http_code=$(curl -sf -o /dev/null -w "%{http_code}" \
-            -H "Authorization: Bearer $test_token" \
-            -H "anthropic-beta: oauth-2025-04-20" \
-            "https://api.anthropic.com/api/oauth/usage" 2>/dev/null) || true
-        if [[ "$http_code" == "401" ]]; then
-            echo "Warning: Account-$target_account credentials appear stale (401)." >&2
+    # Auto-refresh if token is expired
+    if is_token_expired "$target_creds"; then
+        echo "Access token expired for Account-$target_account. Refreshing..."
+        local refreshed_creds
+        refreshed_creds=$(refresh_oauth_token "$target_creds")
+        if [[ -n "$refreshed_creds" ]]; then
+            target_creds="$refreshed_creds"
+            # Persist refreshed credentials to backup atomically
+            write_account_credentials "$target_account" "$target_email" "$target_creds"
+            echo "Token refreshed successfully."
+        else
+            echo "Warning: Token refresh failed for Account-$target_account." >&2
             echo "         After restarting Claude Code, run: /login" >&2
         fi
     fi
@@ -1020,6 +1147,176 @@ perform_switch() {
     
 }
 
+# Refresh tokens for all managed accounts
+cmd_refresh_all() {
+    if [[ ! -f "$SEQUENCE_FILE" ]]; then
+        echo "Error: No accounts are managed yet"
+        exit 1
+    fi
+
+    local active_account
+    active_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+
+    local sequence
+    sequence=($(jq -r '.sequence[]' "$SEQUENCE_FILE"))
+
+    local total=${#sequence[@]} refreshed=0 failed=0 skipped=0
+
+    for account_num in "${sequence[@]}"; do
+        local email
+        email=$(jq -r --arg num "$account_num" '.accounts[$num].email' "$SEQUENCE_FILE")
+        local label
+        label=$(jq -r --arg num "$account_num" '.accounts[$num].label // empty' "$SEQUENCE_FILE")
+        local display="Account-$account_num ($email${label:+ [$label]})"
+
+        local creds
+        if [[ "$account_num" == "$active_account" ]]; then
+            # For active account, read live credentials
+            creds=$(read_credentials)
+        else
+            creds=$(read_account_credentials "$account_num" "$email")
+        fi
+
+        if [[ -z "$creds" ]]; then
+            echo "  $display: SKIP (no credentials)"
+            skipped=$((skipped + 1))
+            continue
+        fi
+
+        if ! is_token_expired "$creds"; then
+            echo "  $display: OK (token still valid)"
+            skipped=$((skipped + 1))
+            continue
+        fi
+
+        echo -n "  $display: refreshing... "
+        local refreshed_creds
+        refreshed_creds=$(refresh_oauth_token "$creds")
+
+        if [[ -n "$refreshed_creds" ]]; then
+            # Write back to backup
+            write_account_credentials "$account_num" "$email" "$refreshed_creds"
+            # If active account, also update live credentials
+            if [[ "$account_num" == "$active_account" ]]; then
+                write_credentials "$refreshed_creds"
+            fi
+            echo "REFRESHED"
+            refreshed=$((refreshed + 1))
+        else
+            echo "FAILED"
+            failed=$((failed + 1))
+        fi
+    done
+
+    echo ""
+    echo "Summary: $refreshed refreshed, $skipped skipped, $failed failed (out of $total accounts)"
+}
+
+# Refresh token for a single account
+cmd_refresh() {
+    if [[ ! -f "$SEQUENCE_FILE" ]]; then
+        echo "Error: No accounts are managed yet"
+        exit 1
+    fi
+
+    local target_account
+    if [[ $# -gt 0 ]]; then
+        local identifier="$1"
+        if [[ "$identifier" =~ ^[0-9]+$ ]]; then
+            target_account="$identifier"
+        else
+            target_account=$(resolve_account_identifier "$identifier")
+            if [[ -z "$target_account" ]]; then
+                echo "Error: No account found: $identifier"
+                exit 1
+            fi
+            if [[ "$target_account" == AMBIGUOUS:* ]]; then
+                show_ambiguous_accounts "$identifier"
+                exit 1
+            fi
+        fi
+    else
+        target_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+    fi
+
+    local email
+    email=$(jq -r --arg num "$target_account" '.accounts[$num].email // empty' "$SEQUENCE_FILE")
+    if [[ -z "$email" ]]; then
+        echo "Error: Account-$target_account does not exist"
+        exit 1
+    fi
+
+    local active_account
+    active_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+
+    local creds
+    if [[ "$target_account" == "$active_account" ]]; then
+        creds=$(read_credentials)
+    else
+        creds=$(read_account_credentials "$target_account" "$email")
+    fi
+
+    if [[ -z "$creds" ]]; then
+        echo "Error: No credentials found for Account-$target_account"
+        exit 1
+    fi
+
+    if ! is_token_expired "$creds"; then
+        echo "Account-$target_account ($email): token still valid, no refresh needed."
+        return 0
+    fi
+
+    echo -n "Refreshing Account-$target_account ($email)... "
+    local refreshed_creds
+    refreshed_creds=$(refresh_oauth_token "$creds")
+
+    if [[ -n "$refreshed_creds" ]]; then
+        write_account_credentials "$target_account" "$email" "$refreshed_creds"
+        if [[ "$target_account" == "$active_account" ]]; then
+            write_credentials "$refreshed_creds"
+        fi
+        echo "done."
+    else
+        echo "failed. Account may need /login."
+        exit 1
+    fi
+}
+
+# Install cron job for periodic token refresh
+cmd_cron_install() {
+    local script_path
+    script_path=$(readlink -f "${BASH_SOURCE[0]}")
+    local cron_schedule="0 5,10,15,20,0 * * *"
+    local cron_cmd="$script_path refresh-all >> /tmp/ccswitch-refresh.log 2>&1"
+    local cron_marker="# ccswitch-refresh-all"
+
+    # Check if already installed
+    if crontab -l 2>/dev/null | grep -qF "$cron_marker"; then
+        echo "Cron job already installed. Use 'cron-remove' to uninstall first."
+        crontab -l 2>/dev/null | grep -F "$cron_marker"
+        return 0
+    fi
+
+    # Append to existing crontab
+    (crontab -l 2>/dev/null; echo "$cron_schedule $cron_cmd $cron_marker") | crontab -
+    echo "Installed cron job: $cron_schedule"
+    echo "Tokens will be refreshed at 00:00, 05:00, 10:00, 15:00, 20:00 daily."
+    echo "Log: /tmp/ccswitch-refresh.log"
+}
+
+# Remove cron job for periodic token refresh
+cmd_cron_remove() {
+    local cron_marker="# ccswitch-refresh-all"
+
+    if ! crontab -l 2>/dev/null | grep -qF "$cron_marker"; then
+        echo "No ccswitch cron job found."
+        return 0
+    fi
+
+    crontab -l 2>/dev/null | grep -vF "$cron_marker" | crontab -
+    echo "Removed ccswitch refresh cron job."
+}
+
 # Show usage
 show_usage() {
     echo "Multi-Account Switcher for Claude Code"
@@ -1033,6 +1330,10 @@ show_usage() {
     echo "  --switch-to <num|email>            Switch to specific account number or email"
     echo "  run [num] [claude args...]         Switch to account (or use active), launch claude, sync on exit"
     echo "  sync                               Sync live credentials to active account backup"
+    echo "  refresh [num|email]                Refresh OAuth token for one account (default: active)"
+    echo "  refresh-all                        Refresh OAuth tokens for all managed accounts"
+    echo "  cron-install                       Install cron job for periodic token refresh"
+    echo "  cron-remove                        Remove cron job for periodic token refresh"
     echo "  --help                             Show this help message"
     echo ""
     echo "Same-email accounts (personal + team):"
@@ -1088,6 +1389,19 @@ main() {
         --run|run)
             shift
             cmd_run "$@"
+            ;;
+        --refresh|refresh)
+            shift
+            cmd_refresh "$@"
+            ;;
+        --refresh-all|refresh-all)
+            cmd_refresh_all
+            ;;
+        --cron-install|cron-install)
+            cmd_cron_install
+            ;;
+        --cron-remove|cron-remove)
+            cmd_cron_remove
             ;;
         --help)
             show_usage

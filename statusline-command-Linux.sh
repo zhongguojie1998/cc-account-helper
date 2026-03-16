@@ -9,7 +9,7 @@
 
 # Cache settings
 CACHE_FILE="/tmp/claude-usage-cache-$(id -u).json"
-CACHE_TTL=60  # seconds
+CACHE_TTL=300  # seconds
 
 # Get cached or fresh usage data
 get_usage() {
@@ -42,7 +42,24 @@ get_usage() {
         --header "anthropic-beta: oauth-2025-04-20" \
         "https://api.anthropic.com/api/oauth/usage" 2>/dev/null) || return 1
 
-    # Cache response
+    # Handle errors
+    if echo "$response" | jq -e '.error' >/dev/null 2>&1; then
+        local err_type
+        err_type=$(echo "$response" | jq -r '.error.type // empty' 2>/dev/null)
+        if [[ "$err_type" == "authentication_error" || "$err_type" == "permission_error" ]]; then
+            # Auth error: return error, delete stale cache
+            rm -f "$CACHE_FILE"
+            echo "$response"
+            return
+        fi
+        # Transient error (rate_limit, overloaded, etc): return stale cache if available
+        if [[ -f "$CACHE_FILE" ]]; then
+            cat "$CACHE_FILE"
+        else
+            echo "$response"
+        fi
+        return
+    fi
     echo "$response" > "$CACHE_FILE"
     echo "$response"
 }
@@ -203,8 +220,10 @@ main() {
     local api_error=""
     [[ -n "$usage" ]] && api_error=$(echo "$usage" | jq -r '.error.type // empty' 2>/dev/null)
 
-    if [[ -n "$api_error" ]]; then
+    if [[ "$api_error" == "authentication_error" || "$api_error" == "permission_error" ]]; then
         line2+=" | ⚠️ /login needed${C_RESET}"
+    elif [[ -n "$api_error" ]]; then
+        line2+=" | ⏳ rate limited${C_RESET}"
     elif [[ -n "$usage" ]]; then
         local five_hour five_hour_resets seven_day seven_day_resets
         five_hour=$(echo "$usage" | jq -r '.five_hour.utilization // empty' 2>/dev/null)
