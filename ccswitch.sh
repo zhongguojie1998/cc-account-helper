@@ -361,24 +361,19 @@ get_current_org_uuid() {
 }
 
 # Read credentials based on platform
-decode_keychain_value() {
-    local val="$1"
-    if [[ "$val" == 0x* ]]; then
-        echo "$val" | sed 's/^0x//' | xxd -r -p
-    else
-        echo "$val"
-    fi
-}
-
 read_credentials() {
     local platform
     platform=$(detect_platform)
 
     case "$platform" in
         macos)
-            local raw
-            raw=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || echo "")
-            decode_keychain_value "$raw"
+            # Claude Code stores credentials in ~/.claude/.credentials.json on all platforms
+            # Fall back to keychain for older Claude Code versions
+            if [[ -f "$HOME/.claude/.credentials.json" ]]; then
+                cat "$HOME/.claude/.credentials.json"
+            else
+                security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || echo ""
+            fi
             ;;
         linux|wsl)
             if [[ -f "$HOME/.claude/.credentials.json" ]]; then
@@ -395,61 +390,40 @@ write_credentials() {
     local credentials="$1"
     local platform
     platform=$(detect_platform)
-    
-    case "$platform" in
-        macos)
-            security add-generic-password -U -s "Claude Code-credentials" -a "$USER" -w "$credentials" 2>/dev/null
-            ;;
-        linux|wsl)
-            mkdir -p "$HOME/.claude"
-            printf '%s' "$credentials" > "$HOME/.claude/.credentials.json"
-            chmod 600 "$HOME/.claude/.credentials.json"
-            ;;
-    esac
+
+    # Always write to file — Claude Code reads from ~/.claude/.credentials.json
+    mkdir -p "$HOME/.claude"
+    printf '%s' "$credentials" > "$HOME/.claude/.credentials.json"
+    chmod 600 "$HOME/.claude/.credentials.json"
+
+    # On macOS, also update keychain for older Claude Code versions
+    if [[ "$platform" == "macos" ]]; then
+        security delete-generic-password -s "Claude Code-credentials" 2>/dev/null || true
+        security add-generic-password -s "Claude Code-credentials" -a "$USER" -w "$credentials" 2>/dev/null || true
+    fi
 }
 
-# Read account credentials from backup
+# Read account credentials from backup (always file-based)
 read_account_credentials() {
     local account_num="$1"
     local email="$2"
-    local platform
-    platform=$(detect_platform)
-
-    case "$platform" in
-        macos)
-            local raw
-            raw=$(security find-generic-password -s "Claude Code-Account-${account_num}-${email}" -w 2>/dev/null || echo "")
-            decode_keychain_value "$raw"
-            ;;
-        linux|wsl)
-            local cred_file="$BACKUP_DIR/credentials/.claude-credentials-${account_num}-${email}.json"
-            if [[ -f "$cred_file" ]]; then
-                cat "$cred_file"
-            else
-                echo ""
-            fi
-            ;;
-    esac
+    local cred_file="$BACKUP_DIR/credentials/.claude-credentials-${account_num}-${email}.json"
+    if [[ -f "$cred_file" ]]; then
+        cat "$cred_file"
+    else
+        echo ""
+    fi
 }
 
-# Write account credentials to backup
+# Write account credentials to backup (always file-based)
 write_account_credentials() {
     local account_num="$1"
     local email="$2"
     local credentials="$3"
-    local platform
-    platform=$(detect_platform)
-    
-    case "$platform" in
-        macos)
-            security add-generic-password -U -s "Claude Code-Account-${account_num}-${email}" -a "$USER" -w "$credentials" 2>/dev/null
-            ;;
-        linux|wsl)
-            local cred_file="$BACKUP_DIR/credentials/.claude-credentials-${account_num}-${email}.json"
-            printf '%s' "$credentials" > "$cred_file"
-            chmod 600 "$cred_file"
-            ;;
-    esac
+    mkdir -p "$BACKUP_DIR/credentials"
+    local cred_file="$BACKUP_DIR/credentials/.claude-credentials-${account_num}-${email}.json"
+    printf '%s' "$credentials" > "$cred_file"
+    chmod 600 "$cred_file"
 }
 
 # Sync live credentials back to the active account's backup
@@ -816,16 +790,7 @@ cmd_remove_account() {
     fi
     
     # Remove backup files
-    local platform
-    platform=$(detect_platform)
-    case "$platform" in
-        macos)
-            security delete-generic-password -s "Claude Code-Account-${account_num}-${email}" 2>/dev/null || true
-            ;;
-        linux|wsl)
-            rm -f "$BACKUP_DIR/credentials/.claude-credentials-${account_num}-${email}.json"
-            ;;
-    esac
+    rm -f "$BACKUP_DIR/credentials/.claude-credentials-${account_num}-${email}.json"
     rm -f "$BACKUP_DIR/configs/.claude-config-${account_num}-${email}.json"
     
     # Update sequence.json
