@@ -105,7 +105,7 @@ refresh_oauth_token() {
 
     # Update credentials JSON preserving all other fields
     local updated_creds
-    updated_creds=$(echo "$creds" | jq \
+    updated_creds=$(echo "$creds" | jq -c \
         --arg at "$new_access" \
         --arg rt "$new_refresh" \
         --argjson ea "$expires_at" \
