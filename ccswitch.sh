@@ -32,7 +32,7 @@ get_oauth_client_id() {
     claude_bin=$(which claude 2>/dev/null || true)
     if [[ -n "$claude_bin" ]]; then
         local client_id
-        client_id=$(strings "$claude_bin" 2>/dev/null | grep -oP 'CLIENT_ID:"[^"]*"' | head -1 | grep -oP '"[^"]*"' | tr -d '"' || true)
+        client_id=$(strings "$claude_bin" 2>/dev/null | grep -oE 'CLIENT_ID:"[^"]*"' | head -1 | grep -oE '"[^"]*"' | tr -d '"' || true)
         if [[ -n "$client_id" ]]; then
             _CACHED_CLIENT_ID="$client_id"
             echo "$_CACHED_CLIENT_ID"
