@@ -361,13 +361,24 @@ get_current_org_uuid() {
 }
 
 # Read credentials based on platform
+decode_keychain_value() {
+    local val="$1"
+    if [[ "$val" == 0x* ]]; then
+        echo "$val" | sed 's/^0x//' | xxd -r -p
+    else
+        echo "$val"
+    fi
+}
+
 read_credentials() {
     local platform
     platform=$(detect_platform)
-    
+
     case "$platform" in
         macos)
-            security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || echo ""
+            local raw
+            raw=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || echo "")
+            decode_keychain_value "$raw"
             ;;
         linux|wsl)
             if [[ -f "$HOME/.claude/.credentials.json" ]]; then
@@ -403,10 +414,12 @@ read_account_credentials() {
     local email="$2"
     local platform
     platform=$(detect_platform)
-    
+
     case "$platform" in
         macos)
-            security find-generic-password -s "Claude Code-Account-${account_num}-${email}" -w 2>/dev/null || echo ""
+            local raw
+            raw=$(security find-generic-password -s "Claude Code-Account-${account_num}-${email}" -w 2>/dev/null || echo "")
+            decode_keychain_value "$raw"
             ;;
         linux|wsl)
             local cred_file="$BACKUP_DIR/credentials/.claude-credentials-${account_num}-${email}.json"
