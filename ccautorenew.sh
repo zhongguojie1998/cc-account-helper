@@ -363,7 +363,7 @@ cmd_log() {
 cmd_cron_install() {
     local script_path
     script_path=$(readlink -f "${BASH_SOURCE[0]}")
-    local cron_schedule="0 0,5,10,15,20 * * *"
+    local cron_schedule="0 6,11,16,21 * * *"
     local cron_cmd="PATH='$PATH' $script_path --once --accounts all >> $AR_LOG_FILE 2>&1"
     local cron_marker="# ccautorenew"
 
@@ -373,9 +373,9 @@ cmd_cron_install() {
         return 0
     fi
 
-    (crontab -l 2>/dev/null; echo "$cron_schedule $cron_cmd $cron_marker") | crontab -
-    echo "Installed cron job: $cron_schedule"
-    echo "Auto-renew will run at 00:00, 05:00, 10:00, 15:00, 20:00 daily."
+    (crontab -l 2>/dev/null; echo "CRON_TZ=America/New_York $cron_marker-tz"; echo "$cron_schedule $cron_cmd $cron_marker") | crontab -
+    echo "Installed cron job: $cron_schedule (America/New_York)"
+    echo "Auto-renew will run at 06:00, 11:00, 16:00, 21:00 ET daily."
     echo "Log: $AR_LOG_FILE"
 }
 
@@ -408,7 +408,7 @@ Commands:
   --stop               Stop the daemon
   --status             Show daemon / last-ping status
   --log [N]            Show last N log lines (default: 20)
-  --cron-install       Install cron job (00:00, 05:00, 10:00, 15:00, 20:00)
+  --cron-install       Install cron job (06:00, 11:00, 16:00, 21:00 ET)
   --cron-remove        Remove cron job
   --help               Show this help
 
