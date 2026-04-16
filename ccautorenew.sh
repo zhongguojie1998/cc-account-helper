@@ -105,7 +105,7 @@ ping_account() {
     log_msg "INFO" "Pinging $display ..."
 
     # Switch to the target account
-    if ! "$CCSWITCH" --switch-to "$account_num" </dev/null >/dev/null 2>&1; then
+    if ! "$CCSWITCH" --to "$account_num" </dev/null >/dev/null 2>&1; then
         log_msg "ERROR" "Failed to switch to $display"
         return 1
     fi
@@ -167,7 +167,7 @@ ping_all_accounts() {
     # Restore the original account
     if [[ -n "$original_account" ]]; then
         log_msg "INFO" "Restoring original Account-$original_account"
-        "$CCSWITCH" --switch-to "$original_account" </dev/null >/dev/null 2>&1 || true
+        "$CCSWITCH" --to "$original_account" </dev/null >/dev/null 2>&1 || true
     fi
 
     log_msg "INFO" "Ping round complete: $success succeeded, $failed failed"

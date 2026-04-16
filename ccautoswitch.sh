@@ -275,7 +275,7 @@ cmd_check() {
     fi
 
     log_msg INFO "Switching to Account-$best_num ($best_display)..."
-    if "$CCSWITCH" --switch-to "$best_num" >> "$AS_LOG_FILE" 2>&1; then
+    if "$CCSWITCH" --to "$best_num" >> "$AS_LOG_FILE" 2>&1; then
         log_msg INFO "Switched to Account-$best_num ($best_display) [${best_util}% usage]"
         update_state "$best_num" "$best_email" "$best_util" "$active_account" "switched"
     else

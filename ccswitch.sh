@@ -33,7 +33,7 @@ get_oauth_client_id() {
     if [[ -n "$claude_bin" ]]; then
         local client_id
         # Extract CLIENT_ID from the config block that also contains TOKEN_URL
-        client_id=$(strings "$claude_bin" 2>/dev/null | grep -oP 'TOKEN_URL:"[^"]*"[^}]*CLIENT_ID:"\K[^"]*' | head -1 || true)
+        client_id=$(strings "$claude_bin" 2>/dev/null | perl -ne 'print "$1\n" if /TOKEN_URL:"[^"]*"[^}]*CLIENT_ID:"([^"]*)"/' | head -1 || true)
         if [[ -z "$client_id" ]]; then
             # Fallback: get the last UUID-format CLIENT_ID (skip deprecated ones)
             client_id=$(strings "$claude_bin" 2>/dev/null | grep -oE 'CLIENT_ID:"[0-9a-f-]{36}"' | tail -1 | grep -oE '"[^"]*"' | tr -d '"' || true)
@@ -404,12 +404,17 @@ read_credentials() {
 
     case "$platform" in
         macos)
-            # Claude Code stores credentials in ~/.claude/.credentials.json on all platforms
-            # Fall back to keychain for older Claude Code versions
-            if [[ -f "$HOME/.claude/.credentials.json" ]]; then
+            # On macOS, Claude Code refreshes tokens in keychain only — prefer keychain
+            # to avoid reading stale file data left by a previous write_credentials call.
+            # Fall back to file if keychain entry doesn't exist.
+            local kc_creds
+            kc_creds=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null) || true
+            if [[ -n "$kc_creds" ]]; then
+                echo "$kc_creds"
+            elif [[ -f "$HOME/.claude/.credentials.json" ]]; then
                 cat "$HOME/.claude/.credentials.json"
             else
-                security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || echo ""
+                echo ""
             fi
             ;;
         linux|wsl)
@@ -435,8 +440,8 @@ write_credentials() {
 
     # On macOS, also update keychain for older Claude Code versions
     if [[ "$platform" == "macos" ]]; then
-        security delete-generic-password -s "Claude Code-credentials" 2>/dev/null || true
-        security add-generic-password -s "Claude Code-credentials" -a "$USER" -w "$credentials" 2>/dev/null || true
+        security delete-generic-password -s "Claude Code-credentials" >/dev/null 2>&1 || true
+        security add-generic-password -s "Claude Code-credentials" -a "$USER" -w "$credentials" >/dev/null 2>&1 || true
     fi
 }
 
@@ -972,7 +977,7 @@ cmd_switch() {
 # Switch to specific account
 cmd_switch_to() {
     if [[ $# -eq 0 ]]; then
-        echo "Usage: $0 --switch-to <account_number|email>"
+        echo "Usage: $0 --to <account_number|email>"
         exit 1
     fi
 
@@ -1234,6 +1239,17 @@ cmd_refresh() {
         exit 1
     fi
 
+    local force=false
+    local args=()
+    for arg in "$@"; do
+        if [[ "$arg" == "--force" || "$arg" == "-f" ]]; then
+            force=true
+        else
+            args+=("$arg")
+        fi
+    done
+    set -- "${args[@]}"
+
     local target_account
     if [[ $# -gt 0 ]]; then
         local identifier="$1"
@@ -1276,7 +1292,7 @@ cmd_refresh() {
         exit 1
     fi
 
-    if ! is_token_expired "$creds"; then
+    if [[ "$force" == false ]] && ! is_token_expired "$creds"; then
         echo "Account-$target_account ($email): token still valid, no refresh needed."
         return 0
     fi
@@ -1342,10 +1358,10 @@ show_usage() {
     echo "  --remove-account <num|email>      Remove account by number or email"
     echo "  --list                             List all managed accounts"
     echo "  --switch                           Rotate to next account in sequence"
-    echo "  --switch-to <num|email>            Switch to specific account number or email"
+    echo "  --to <num|email>                   Switch to specific account number or email"
     echo "  run [num] [claude args...]         Switch to account (or use active), launch claude, sync on exit"
     echo "  sync                               Sync live credentials to active account backup"
-    echo "  refresh [num|email]                Refresh OAuth token for one account (default: active)"
+    echo "  refresh [--force] [num|email]      Refresh OAuth token for one account (default: active)"
     echo "  refresh-all                        Refresh OAuth tokens for all managed accounts"
     echo "  cron-install                       Install cron job for periodic token refresh"
     echo "  cron-remove                        Remove cron job for periodic token refresh"
@@ -1361,8 +1377,8 @@ show_usage() {
     echo "  $0 --add-account --label \"Team\""
     echo "  $0 --list"
     echo "  $0 --switch"
-    echo "  $0 --switch-to 2"
-    echo "  $0 --switch-to user@example.com"
+    echo "  $0 --to 2"
+    echo "  $0 --to user@example.com"
     echo "  $0 --remove-account user@example.com"
     echo "  $0 run 2                          # switch to account 2, launch claude, auto-sync on exit"
     echo "  $0 sync                           # manually sync live credentials to backup"
@@ -1394,7 +1410,7 @@ main() {
         --switch)
             cmd_switch
             ;;
-        --switch-to)
+        --to|to)
             shift
             cmd_switch_to "$@"
             ;;

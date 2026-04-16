@@ -87,8 +87,8 @@ mv statusline-command-Linux.sh ~/.claude/statusline-command-Linux.sh
 ./ccswitch.sh --switch
 
 # Switch to specific account by number or email
-./ccswitch.sh --switch-to 2
-./ccswitch.sh --switch-to user2@example.com
+./ccswitch.sh --to 2
+./ccswitch.sh --to user2@example.com
 
 # Remove an account
 ./ccswitch.sh --remove-account user2@example.com
