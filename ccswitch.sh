@@ -81,6 +81,7 @@ refresh_oauth_token() {
     response=$(curl -s -w "\n%{http_code}" \
         -X POST "$OAUTH_TOKEN_URL" \
         -H "Content-Type: application/json" \
+        -H "User-Agent: node" \
         -d "$json_body" 2>/dev/null) || { echo ""; return; }
 
     http_code=$(echo "$response" | tail -1)
