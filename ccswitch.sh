@@ -32,7 +32,12 @@ get_oauth_client_id() {
     claude_bin=$(which claude 2>/dev/null || true)
     if [[ -n "$claude_bin" ]]; then
         local client_id
-        client_id=$(strings "$claude_bin" 2>/dev/null | grep -oE 'CLIENT_ID:"[^"]*"' | head -1 | grep -oE '"[^"]*"' | tr -d '"' || true)
+        # Extract CLIENT_ID from the config block that also contains TOKEN_URL
+        client_id=$(strings "$claude_bin" 2>/dev/null | grep -oP 'TOKEN_URL:"[^"]*"[^}]*CLIENT_ID:"\K[^"]*' | head -1 || true)
+        if [[ -z "$client_id" ]]; then
+            # Fallback: get the last UUID-format CLIENT_ID (skip deprecated ones)
+            client_id=$(strings "$claude_bin" 2>/dev/null | grep -oE 'CLIENT_ID:"[0-9a-f-]{36}"' | tail -1 | grep -oE '"[^"]*"' | tr -d '"' || true)
+        fi
         if [[ -n "$client_id" ]]; then
             _CACHED_CLIENT_ID="$client_id"
             echo "$_CACHED_CLIENT_ID"
@@ -60,11 +65,23 @@ refresh_oauth_token() {
     local client_id
     client_id=$(get_oauth_client_id) || { echo ""; return; }
 
+    # Extract scopes from credentials for the refresh request
+    local scopes
+    scopes=$(echo "$creds" | jq -r '.claudeAiOauth.scopes // [] | join(" ")')
+
+    local json_body
+    json_body=$(jq -nc \
+        --arg gt "refresh_token" \
+        --arg rt "$refresh_token" \
+        --arg ci "$client_id" \
+        --arg sc "$scopes" \
+        '{grant_type: $gt, refresh_token: $rt, client_id: $ci, scope: $sc}')
+
     local response http_code body
     response=$(curl -s -w "\n%{http_code}" \
         -X POST "$OAUTH_TOKEN_URL" \
-        -H "Content-Type: application/x-www-form-urlencoded" \
-        -d "grant_type=refresh_token&refresh_token=${refresh_token}&client_id=${client_id}" 2>/dev/null) || { echo ""; return; }
+        -H "Content-Type: application/json" \
+        -d "$json_body" 2>/dev/null) || { echo ""; return; }
 
     http_code=$(echo "$response" | tail -1)
     body=$(echo "$response" | sed '$d')
@@ -103,15 +120,34 @@ refresh_oauth_token() {
         expires_at=$(( ${now_ms%000} * 1000 + 28800 * 1000 ))
     fi
 
+    # Extract scopes from response if present
+    local new_scopes
+    new_scopes=$(echo "$body" | jq -r '.scope // empty')
+
     # Update credentials JSON preserving all other fields
     local updated_creds
-    updated_creds=$(echo "$creds" | jq -c \
-        --arg at "$new_access" \
-        --arg rt "$new_refresh" \
-        --argjson ea "$expires_at" \
-        '.claudeAiOauth.accessToken = $at |
-         .claudeAiOauth.refreshToken = $rt |
-         .claudeAiOauth.expiresAt = $ea')
+    if [[ -n "$new_scopes" ]]; then
+        # Convert space-separated scopes to JSON array
+        local scopes_json
+        scopes_json=$(echo "$new_scopes" | tr ' ' '\n' | jq -R . | jq -sc .)
+        updated_creds=$(echo "$creds" | jq -c \
+            --arg at "$new_access" \
+            --arg rt "$new_refresh" \
+            --argjson ea "$expires_at" \
+            --argjson sc "$scopes_json" \
+            '.claudeAiOauth.accessToken = $at |
+             .claudeAiOauth.refreshToken = $rt |
+             .claudeAiOauth.expiresAt = $ea |
+             .claudeAiOauth.scopes = $sc')
+    else
+        updated_creds=$(echo "$creds" | jq -c \
+            --arg at "$new_access" \
+            --arg rt "$new_refresh" \
+            --argjson ea "$expires_at" \
+            '.claudeAiOauth.accessToken = $at |
+             .claudeAiOauth.refreshToken = $rt |
+             .claudeAiOauth.expiresAt = $ea')
+    fi
 
     echo "$updated_creds"
 }
