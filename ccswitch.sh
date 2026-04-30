@@ -1232,6 +1232,176 @@ cmd_refresh_all() {
     echo "Summary: $refreshed refreshed, $skipped skipped, $failed failed (out of $total accounts)"
 }
 
+# Fetch usage for a single account's access token
+fetch_account_usage() {
+    local token="$1"
+    local response
+    response=$(curl --silent --max-time 10 \
+        --header "Authorization: Bearer $token" \
+        --header "anthropic-beta: oauth-2025-04-20" \
+        "https://api.anthropic.com/api/oauth/usage" 2>/dev/null) || { echo ""; return; }
+    echo "$response"
+}
+
+# Format minutes to human readable (shared with statusline scripts)
+_format_time_mins() {
+    local mins=$1
+    if (( mins <= 0 )); then echo "now"; return; fi
+    local days hours minutes
+    days=$((mins / 1440))
+    hours=$(((mins % 1440) / 60))
+    minutes=$((mins % 60))
+    if (( days > 0 )); then
+        echo "${days}d ${hours}h"
+    elif (( hours > 0 )); then
+        echo "${hours}h ${minutes}m"
+    else
+        echo "${minutes}m"
+    fi
+}
+
+# Rate indicator: compares usage% vs time-elapsed%
+_rate_indicator() {
+    local usage=$1 remaining_mins=$2 total_mins=$3
+    local elapsed=$(( total_mins - remaining_mins ))
+    (( elapsed < 0 )) && elapsed=0
+    local time_pct=0
+    (( total_mins > 0 )) && time_pct=$(( elapsed * 100 / total_mins ))
+    local diff=$(( usage - time_pct ))
+    if (( diff <= 0 )); then echo "🟢"
+    elif (( diff <= 5 )); then echo "🟡"
+    elif (( diff <= 15 )); then echo "🟠"
+    else echo "🔴"
+    fi
+}
+
+# Parse ISO timestamp → minutes remaining (GNU date)
+_time_remaining_mins() {
+    local reset_at="$1"
+    local now reset_ts
+    now=$(date +%s)
+    local ts_clean="${reset_at%%.*}"
+    ts_clean="${ts_clean//T/ }"
+    reset_ts=$(TZ=UTC date -d "$ts_clean" +%s 2>/dev/null) || { echo "0"; return; }
+    echo $(( (reset_ts - now) / 60 ))
+}
+
+# Check usage for all managed accounts
+cmd_usage() {
+    if [[ ! -f "$SEQUENCE_FILE" ]]; then
+        echo "Error: No accounts are managed yet"
+        exit 1
+    fi
+
+    local active_account
+    active_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+
+    local sequence
+    sequence=($(jq -r '.sequence[]' "$SEQUENCE_FILE"))
+
+    echo "Account Usage:"
+    echo ""
+
+    for account_num in "${sequence[@]}"; do
+        local email label display creds token
+        email=$(jq -r --arg num "$account_num" '.accounts[$num].email' "$SEQUENCE_FILE")
+        label=$(jq -r --arg num "$account_num" '.accounts[$num].label // empty' "$SEQUENCE_FILE")
+        display="Account-$account_num ($email${label:+ [$label]})"
+        [[ "$account_num" == "$active_account" ]] && display+=" *active*"
+
+        echo "  $display"
+
+        if [[ "$account_num" == "$active_account" ]]; then
+            creds=$(read_credentials)
+        else
+            creds=$(read_account_credentials "$account_num" "$email")
+        fi
+
+        if [[ -z "$creds" ]]; then
+            echo "    No credentials found"
+            echo ""
+            continue
+        fi
+
+        token=$(echo "$creds" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
+        if [[ -z "$token" ]]; then
+            echo "    No access token"
+            echo ""
+            continue
+        fi
+
+        # Refresh token if expired before checking usage
+        if is_token_expired "$creds"; then
+            echo -n "    Token expired, refreshing... "
+            local refreshed_creds
+            refreshed_creds=$(refresh_oauth_token "$creds")
+            if [[ -n "$refreshed_creds" ]]; then
+                creds="$refreshed_creds"
+                write_account_credentials "$account_num" "$email" "$refreshed_creds"
+                if [[ "$account_num" == "$active_account" ]]; then
+                    write_credentials "$refreshed_creds"
+                fi
+                token=$(echo "$creds" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
+                echo "done"
+            else
+                echo "failed"
+            fi
+        fi
+
+        local usage
+        usage=$(fetch_account_usage "$token")
+
+        if [[ -z "$usage" ]]; then
+            echo "    Failed to fetch usage (network error)"
+            echo ""
+            continue
+        fi
+
+        local err_type
+        err_type=$(echo "$usage" | jq -r '.error.type // empty' 2>/dev/null)
+        if [[ "$err_type" == "authentication_error" || "$err_type" == "permission_error" ]]; then
+            echo "    ⚠️  Auth error — run: ccswitch --to $account_num && /login"
+            echo ""
+            continue
+        elif [[ -n "$err_type" ]]; then
+            echo "    ⏳ API error: $err_type"
+            echo ""
+            continue
+        fi
+
+        # 5-hour window
+        local fh_util fh_resets fh_int fh_mins fh_time
+        fh_util=$(echo "$usage" | jq -r '.five_hour.utilization // empty' 2>/dev/null)
+        fh_resets=$(echo "$usage" | jq -r '.five_hour.resets_at // empty' 2>/dev/null)
+        if [[ -n "$fh_util" ]]; then
+            fh_int=$(printf "%.0f" "$fh_util")
+            fh_mins=$(_time_remaining_mins "$fh_resets")
+            fh_time=$(_format_time_mins "$fh_mins")
+            local fh_ind
+            fh_ind=$(_rate_indicator "$fh_int" "$fh_mins" 300)
+            printf "    %s 5h:  %3d%%  (resets in %s)\n" "$fh_ind" "$fh_int" "$fh_time"
+        fi
+
+        # 7-day window
+        local sd_util sd_resets sd_int sd_mins sd_time
+        sd_util=$(echo "$usage" | jq -r '.seven_day.utilization // empty' 2>/dev/null)
+        sd_resets=$(echo "$usage" | jq -r '.seven_day.resets_at // empty' 2>/dev/null)
+        if [[ -n "$sd_util" ]]; then
+            sd_int=$(printf "%.0f" "$sd_util")
+            sd_mins=$(_time_remaining_mins "$sd_resets")
+            sd_time=$(_format_time_mins "$sd_mins")
+            local sd_ind
+            sd_ind=$(_rate_indicator "$sd_int" "$sd_mins" 10080)
+            printf "    %s 7d:  %3d%%  (resets in %s)\n" "$sd_ind" "$sd_int" "$sd_time"
+        fi
+
+        if [[ -z "$fh_util" && -z "$sd_util" ]]; then
+            echo "    No usage data available"
+        fi
+        echo ""
+    done
+}
+
 # Refresh token for a single account
 cmd_refresh() {
     if [[ ! -f "$SEQUENCE_FILE" ]]; then
@@ -1365,6 +1535,7 @@ show_usage() {
     echo "  refresh-all                        Refresh OAuth tokens for all managed accounts"
     echo "  cron-install                       Install cron job for periodic token refresh"
     echo "  cron-remove                        Remove cron job for periodic token refresh"
+    echo "  --usage, -u                        Check API usage for all managed accounts"
     echo "  --help                             Show this help message"
     echo ""
     echo "Same-email accounts (personal + team):"
@@ -1433,6 +1604,9 @@ main() {
             ;;
         --cron-remove|cron-remove)
             cmd_cron_remove
+            ;;
+        --usage|-u|usage)
+            cmd_usage
             ;;
         --help)
             show_usage
