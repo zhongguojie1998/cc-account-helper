@@ -11,6 +11,9 @@ readonly SEQUENCE_FILE="$BACKUP_DIR/sequence.json"
 
 # OAuth token refresh
 readonly OAUTH_TOKEN_URL="https://platform.claude.com/v1/oauth/token"
+# Known stable public Claude Code OAuth client ID. Used as the final fallback
+# when extraction from the binary fails. NOT the DESIGN_CLIENT_ID.
+readonly DEFAULT_OAUTH_CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 _CACHED_CLIENT_ID=""
 
 # Extract OAuth client ID from Claude Code binary or env var
@@ -32,11 +35,21 @@ get_oauth_client_id() {
     claude_bin=$(which claude 2>/dev/null || true)
     if [[ -n "$claude_bin" ]]; then
         local client_id
-        # Extract CLIENT_ID from the config block that also contains TOKEN_URL
-        client_id=$(strings "$claude_bin" 2>/dev/null | perl -ne 'print "$1\n" if /TOKEN_URL:"[^"]*"[^}]*CLIENT_ID:"([^"]*)"/' | head -1 || true)
+        # Extract the OAuth CLIENT_ID from the config block containing TOKEN_URL.
+        # The negative lookbehind (?<![A-Za-z_]) is required so we match the real
+        # CLIENT_ID and not the adjacent DESIGN_CLIENT_ID:"<uuid>" field, which
+        # contains "CLIENT_ID" as a substring. The non-greedy [^}]*? stops at the
+        # first real CLIENT_ID instead of skipping ahead to DESIGN_CLIENT_ID.
+        client_id=$(strings "$claude_bin" 2>/dev/null | perl -ne 'print "$1\n" if /TOKEN_URL:"[^"]*"[^}]*?(?<![A-Za-z_])CLIENT_ID:"([0-9a-f-]{36})"/' | head -1 || true)
         if [[ -z "$client_id" ]]; then
-            # Fallback: get the last UUID-format CLIENT_ID (skip deprecated ones)
-            client_id=$(strings "$claude_bin" 2>/dev/null | grep -oE 'CLIENT_ID:"[0-9a-f-]{36}"' | tail -1 | grep -oE '"[^"]*"' | tr -d '"' || true)
+            # Fallback: collect all real (non-DESIGN) CLIENT_IDs; prefer the known default.
+            local ids
+            ids=$(strings "$claude_bin" 2>/dev/null | perl -ne 'while (/(?<![A-Za-z_])CLIENT_ID:"([0-9a-f-]{36})"/g) { print "$1\n" }' | sort -u || true)
+            if grep -qx "$DEFAULT_OAUTH_CLIENT_ID" <<<"$ids"; then
+                client_id="$DEFAULT_OAUTH_CLIENT_ID"
+            else
+                client_id=$(head -1 <<<"$ids")
+            fi
         fi
         if [[ -n "$client_id" ]]; then
             _CACHED_CLIENT_ID="$client_id"
@@ -45,8 +58,10 @@ get_oauth_client_id() {
         fi
     fi
 
-    echo "Error: Cannot determine OAuth client ID. Set CLAUDE_CODE_OAUTH_CLIENT_ID env var." >&2
-    return 1
+    # Final fallback: known stable public client ID
+    _CACHED_CLIENT_ID="$DEFAULT_OAUTH_CLIENT_ID"
+    echo "$_CACHED_CLIENT_ID"
+    return
 }
 
 # Refresh OAuth token using refresh_token grant
