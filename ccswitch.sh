@@ -1290,14 +1290,20 @@ _rate_indicator() {
     fi
 }
 
-# Parse ISO timestamp → minutes remaining (GNU date)
+# Parse ISO timestamp → minutes remaining (macOS/Linux compatible)
 _time_remaining_mins() {
     local reset_at="$1"
     local now reset_ts
     now=$(date +%s)
     local ts_clean="${reset_at%%.*}"
     ts_clean="${ts_clean//T/ }"
-    reset_ts=$(TZ=UTC date -d "$ts_clean" +%s 2>/dev/null) || { echo "0"; return; }
+    if date --version &>/dev/null 2>&1; then
+        # GNU date (Linux)
+        reset_ts=$(TZ=UTC date -d "$ts_clean" +%s 2>/dev/null) || { echo "0"; return; }
+    else
+        # BSD date (macOS)
+        reset_ts=$(TZ=UTC date -jf "%Y-%m-%d %H:%M:%S" "$ts_clean" +%s 2>/dev/null) || { echo "0"; return; }
+    fi
     echo $(( (reset_ts - now) / 60 ))
 }
 
