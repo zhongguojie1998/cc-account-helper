@@ -64,6 +64,58 @@ account_display() {
     echo "Codex ($id)"
 }
 
+CAPTURED_OUTPUT=""
+
+capture_with_timeout() {
+    local seconds="$1"; shift
+    local exit_code=0
+
+    if command -v timeout >/dev/null 2>&1; then
+        CAPTURED_OUTPUT=$(timeout "$seconds" "$@" </dev/null 2>&1) || exit_code=$?
+        return "$exit_code"
+    fi
+
+    if command -v gtimeout >/dev/null 2>&1; then
+        CAPTURED_OUTPUT=$(gtimeout "$seconds" "$@" </dev/null 2>&1) || exit_code=$?
+        return "$exit_code"
+    fi
+
+    local tmp pid elapsed=0
+    tmp=$(mktemp "${TMPDIR:-/tmp}/cxautorenew.XXXXXX") || return 1
+
+    "$@" </dev/null >"$tmp" 2>&1 &
+    pid=$!
+
+    while kill -0 "$pid" 2>/dev/null; do
+        if [[ $elapsed -ge $seconds ]]; then
+            kill "$pid" 2>/dev/null || true
+            sleep 1
+            kill -9 "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            CAPTURED_OUTPUT=$(cat "$tmp")
+            rm -f "$tmp"
+            return 124
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    wait "$pid" || exit_code=$?
+    CAPTURED_OUTPUT=$(cat "$tmp")
+    rm -f "$tmp"
+    return "$exit_code"
+}
+
+format_epoch_local() {
+    local epoch="$1"
+    date -r "$epoch" '+%Y-%m-%d %H:%M' 2>/dev/null || date -d "@$epoch" '+%Y-%m-%d %H:%M'
+}
+
+format_epoch_utc_iso() {
+    local epoch="$1"
+    date -u -r "$epoch" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d "@$epoch" '+%Y-%m-%dT%H:%M:%SZ'
+}
+
 # ---------------------------------------------------------------------------
 # Core: ping the account
 # ---------------------------------------------------------------------------
@@ -83,7 +135,8 @@ ping_account() {
     [[ -n "$AR_REASONING" ]] && cmd+=(-c "model_reasoning_effort=\"$AR_REASONING\"")
 
     local output exit_code=0
-    output=$(timeout 120 "${cmd[@]}" </dev/null 2>&1) || exit_code=$?
+    capture_with_timeout 120 "${cmd[@]}" || exit_code=$?
+    output="$CAPTURED_OUTPUT"
 
     if [[ $exit_code -eq 0 ]]; then
         log_msg "INFO" "Successfully pinged $display"
@@ -107,7 +160,7 @@ run_ping() {
     # Persist state
     local now next
     now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-    next=$(date -u -d "+${AR_INTERVAL_HOURS} hours" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "unknown")
+    next=$(format_epoch_utc_iso "$(($(date +%s) + AR_INTERVAL_HOURS * 3600))" 2>/dev/null || echo "unknown")
     cat > "$AR_STATE_FILE" <<EOF
 {
   "lastPing": "$now",
@@ -126,22 +179,32 @@ EOF
 
 seconds_until() {
     local target="$1"  # HH:MM
-    local hour min now_epoch target_epoch
-    hour=${target%%:*}
-    min=${target##*:}
+    local hour min now_h now_m now_s now_day_s target_day_s wait_s
 
-    now_epoch=$(date +%s)
-    target_epoch=$(date -d "today ${hour}:${min}" +%s 2>/dev/null) || {
+    if [[ ! "$target" =~ ^[0-9]{1,2}:[0-9]{2}$ ]]; then
         echo "Error: cannot parse time '$target' (use HH:MM)" >&2
         return 1
-    }
-
-    # If the target already passed today, schedule for tomorrow
-    if [[ $target_epoch -le $now_epoch ]]; then
-        target_epoch=$((target_epoch + 86400))
     fi
 
-    echo $((target_epoch - now_epoch))
+    hour=${target%%:*}
+    min=${target##*:}
+    if ((10#$hour > 23 || 10#$min > 59)); then
+        echo "Error: cannot parse time '$target' (use HH:MM)" >&2
+        return 1
+    fi
+
+    now_h=$(date '+%H')
+    now_m=$(date '+%M')
+    now_s=$(date '+%S')
+    now_day_s=$((10#$now_h * 3600 + 10#$now_m * 60 + 10#$now_s))
+    target_day_s=$((10#$hour * 3600 + 10#$min * 60))
+    wait_s=$((target_day_s - now_day_s))
+
+    if [[ $wait_s -le 0 ]]; then
+        wait_s=$((wait_s + 86400))
+    fi
+
+    echo "$wait_s"
 }
 
 # ---------------------------------------------------------------------------
@@ -157,7 +220,7 @@ run_daemon() {
         local wait_secs
         wait_secs=$(seconds_until "$AR_AT_TIME")
         local when
-        when=$(date -d "+${wait_secs} seconds" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$AR_AT_TIME")
+        when=$(format_epoch_local "$(($(date +%s) + wait_secs))" 2>/dev/null || echo "$AR_AT_TIME")
         log_msg "INFO" "Waiting until $when (${wait_secs}s) ..."
         sleep "$wait_secs"
     fi
@@ -168,7 +231,7 @@ run_daemon() {
 
         local sleep_secs=$((AR_INTERVAL_HOURS * 3600))
         local next
-        next=$(date -d "+${sleep_secs} seconds" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "in ${AR_INTERVAL_HOURS}h")
+        next=$(format_epoch_local "$(($(date +%s) + sleep_secs))" 2>/dev/null || echo "in ${AR_INTERVAL_HOURS}h")
         log_msg "INFO" "Next ping at $next (sleeping ${AR_INTERVAL_HOURS}h)"
         sleep "$sleep_secs"
     done
@@ -292,7 +355,7 @@ cmd_log() {
 
 cmd_cron_install() {
     local script_path
-    script_path=$(readlink -f "${BASH_SOURCE[0]}")
+    script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
     local cron_schedule="0 6,11,16,21 * * *"
     local cron_cmd="PATH='$PATH' $script_path --once >> $AR_LOG_FILE 2>&1"
     local cron_marker="# cxautorenew"
