@@ -20,12 +20,12 @@ readonly AR_LOG_FILE="$STATE_DIR/cxautorenew.log"
 readonly AR_STATE_FILE="$STATE_DIR/cxautorenew-state.json"
 
 # Defaults (overridable via flags)
-AR_INTERVAL_HOURS=5
-AR_MODEL=""                 # empty => use Codex configured default model
-AR_REASONING="low"          # cheap reasoning effort for the ping
-AR_MESSAGE="hi"
-AR_AT_TIME=""
-AR_LOG_LINES=20
+AR_INTERVAL_HOURS="${AR_INTERVAL_HOURS:-5}"
+AR_MODEL="${AR_MODEL:-gpt-5.4-mini}"  # smallest Codex model for a cheap ping
+AR_REASONING="${AR_REASONING:-low}"   # cheap reasoning effort for the ping
+AR_MESSAGE="${AR_MESSAGE:-hi}"
+AR_AT_TIME="${AR_AT_TIME:-}"
+AR_LOG_LINES="${AR_LOG_LINES:-20}"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -344,7 +344,7 @@ Commands:
 Options (for --start and --once):
   --at HH:MM           Schedule first ping at a specific time
   --interval HOURS     Hours between pings (default: 5)
-  --model MODEL        Model for the ping (default: Codex configured default)
+  --model MODEL        Model for the ping (default: gpt-5.4-mini)
   --effort EFFORT      Reasoning effort: minimal|low|medium|high|xhigh (default: low)
   --message MSG        Message to send (default: hi)
 
