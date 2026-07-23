@@ -1094,21 +1094,22 @@ cmd_run() {
 # Perform the actual account switch
 perform_switch() {
     local target_account="$1"
-    
-    # Get current and target account info
-    local current_account target_email current_email
-    current_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+
+    # Get target account info
+    local target_email
     target_email=$(jq -r --arg num "$target_account" '.accounts[$num].email' "$SEQUENCE_FILE")
-    current_email=$(get_current_account)
-    
-    # Step 1: Backup current account
-    local current_creds current_config
-    current_creds=$(read_credentials)
-    current_config=$(cat "$(get_claude_config_path)")
-    
-    write_account_credentials "$current_account" "$current_email" "$current_creds"
-    write_account_config "$current_account" "$current_email" "$current_config"
-    
+
+    # Step 1: Back up the currently-active account. Key the backup by the account's
+    # sequence-registered email (what sync_current_credentials does), NOT the live
+    # config email. The two diverge for same-org / same-UUID multi-accounts (and after
+    # any live/sequence desync); keying by the live email mis-files the backup, leaving
+    # the slot's canonical file stale. The next switch-in then restores those stale
+    # creds, whose refresh token — now single-use and short-lived in current Claude
+    # Code — has already been rotated, so refresh fails and Claude Code forces /login.
+    if ! sync_current_credentials; then
+        echo "Warning: Failed to back up current account before switching." >&2
+    fi
+
     # Step 2: Retrieve target account
     local target_creds target_config
     target_creds=$(read_account_credentials "$target_account" "$target_email")
